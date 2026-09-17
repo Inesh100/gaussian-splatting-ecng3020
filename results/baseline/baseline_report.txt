@@ -1,0 +1,24 @@
+ECNG3020 — Constrained Gaussian Splatting
+Baseline 3DGS Experiment
+
+Dataset:
+Garden — 360_v2
+
+Training:
+Iterations: 1000
+Resolution scale: 8
+Viewer: Disabled
+
+Hardware:
+GPU: Tesla T4
+PyTorch: 2.11.0+cu128
+
+Results:
+Gaussian count: 278,677
+Point-cloud size: 65.91 MB
+
+Point cloud:
+point_cloud/point_cloud.ply
+
+Example render:
+render/00000.png
