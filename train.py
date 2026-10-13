@@ -168,14 +168,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    # Apply the same hard cap after each densification cycle.
+                    # Apply stochastic budget enforcement after every densification cycle.
                     gaussians.densify_and_prune(
-                        opt.densify_grad_threshold,
-                        0.005,
-                        scene.cameras_extent,
-                        size_threshold,
-                        radii,
-                        gaussian_budget=dataset.gaussian_budget,
+                        opt.densify_grad_threshold,  # Gradient threshold for clone/split decisions.
+                        0.005,  # Minimum opacity used by the standard 3DGS pruning step.
+                        scene.cameras_extent,  # Scene radius used to evaluate Gaussian scale.
+                        size_threshold,  # Optional maximum projected radius for normal pruning.
+                        radii,  # Current view-space radii required by the pruning code.
+                        gaussian_budget=dataset.gaussian_budget,  # Maximum allowed number of Gaussians.
+                        stochastic_prune_power=opt.stochastic_prune_power,  # Strength of low-opacity removal bias.
                     )
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
