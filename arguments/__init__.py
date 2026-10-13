@@ -57,7 +57,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         # Maximum Gaussian count for initialization and training; override with --gaussian_budget.
-        self.gaussian_budget = 500000
+        self.gaussian_budget = 500000  # Default cap; command-line values can set a different experiment budget.
         super().__init__(parser, "Loading Model Parameters", sentinel)
     def extract(self, args):
         g = super().extract(args)
