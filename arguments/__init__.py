@@ -98,9 +98,9 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
-        # Reserved for future stochastic-swap experiments; the current budget cap
-        # prunes low-opacity Gaussians instead of swapping them.
-        self.stochastic_swap_m = 25000
+        # Controls the stochastic bias toward removing low-opacity Gaussians.
+        # 1.0 gives a mild bias; larger values favour low-opacity points more strongly.
+        self.stochastic_prune_power = 2.0
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
