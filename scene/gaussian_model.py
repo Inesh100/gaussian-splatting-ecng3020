@@ -145,9 +145,27 @@ class GaussianModel:
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
-
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
+#Implimented code Start
+    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float,target_budget : int = 500000):
         self.spatial_lr_scale = spatial_lr_scale
+        points = np.asarray(pcd.points)
+        colors = np.asarray(pcd.colors)
+        num_points = points.shape[0]
+        if num_points > target_budget:
+            print(f"Point cloud has {num_points} points, which is more than the target budget of {target_budget}. Downsampling...")
+            indices = np.random.choice(num_points, target_budget, replace=False)
+            points = points[indices]
+            colors = colors[indices]
+            print(f"Downsampled to {points.shape[0]} points.")
+            elif num_points < target_budget:
+            print(f"Point cloud has {num_points} points, which is less than the target budget of {target_budget}. Upsampling...")
+            extra_needed = target_budget - num_points
+            indices = np.random.choice(num_points, extra_needed, replace=True)
+            points = np.concatenate([points, points[indices]], axis=0)
+            colors = np.concatenate([colors, colors[indices]], axis=0)
+            print(f"Upsampled to {points.shape[0]} points.")
+            fused_point_cloud = torch.tensor(points).float().cuda()
+# Implemented code Finish
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -450,6 +468,7 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
