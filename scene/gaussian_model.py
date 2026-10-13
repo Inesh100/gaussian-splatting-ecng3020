@@ -145,79 +145,79 @@ class GaussianModel:
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
-    def create_from_pcd(self, pcd: BasicPointCloud, cam_infos: int, spatial_lr_scale: float, target_budget: int = 500000):
+    def create_from_pcd(self, pcd: BasicPointCloud, cam_infos: int, spatial_lr_scale: float, target_budget: int = 500000):  # Build the initial Gaussian set and cap its size.
         """Initialize Gaussians from a point cloud with a configurable point budget.
 
         Positions and colours are sampled together so each position keeps its
         original colour. Small point clouds are sampled with replacement to
         reach the requested initial count.
         """
-        self.spatial_lr_scale = spatial_lr_scale
+        self.spatial_lr_scale = spatial_lr_scale  # Store the scene scale used by the position learning rate.
 
         # Reject invalid budgets and empty point clouds before sampling.
-        if target_budget <= 0:
-            raise ValueError("target_budget must be a positive integer.")
+        if target_budget <= 0:  # A zero or negative budget cannot initialize a useful scene.
+            raise ValueError("target_budget must be a positive integer.")  # Stop early with a clear error.
 
-        points = np.asarray(pcd.points)
-        colors = np.asarray(pcd.colors)
-        num_points = points.shape[0]
+        points = np.asarray(pcd.points)  # Convert point positions to a NumPy array for sampling.
+        colors = np.asarray(pcd.colors)  # Convert matching point colours to a NumPy array.
+        num_points = points.shape[0]  # Count the available input points.
 
-        if num_points == 0:
-            raise ValueError("The input point cloud is empty.")
-        if colors.shape[0] != num_points:
-            raise ValueError("The point and colour arrays must contain the same number of entries.")
+        if num_points == 0:  # Sampling cannot work if there are no input points.
+            raise ValueError("The input point cloud is empty.")  # Explain why initialization cannot continue.
+        if colors.shape[0] != num_points:  # Every point must have one matching colour.
+            raise ValueError("The point and colour arrays must contain the same number of entries.")  # Reject misaligned data.
 
         # Downsample without replacement when the input exceeds the budget.
-        if num_points > target_budget:
-            print(f"Point cloud has {num_points} points; downsampling to budget {target_budget}.")
-            sample_indices = np.random.choice(num_points, size=target_budget, replace=False)
-            points = points[sample_indices]
-            colors = colors[sample_indices]
+        if num_points > target_budget:  # Use this branch when the point cloud is too large.
+            print(f"Point cloud has {num_points} points; downsampling to budget {target_budget}.")  # Log the sampling decision.
+            sample_indices = np.random.choice(num_points, size=target_budget, replace=False)  # Randomly choose distinct point indices.
+            points = points[sample_indices]  # Keep the selected positions only.
+            colors = colors[sample_indices]  # Keep the colours at those same indices.
 
         # Duplicate randomly selected points when needed to reach the initial budget.
-        elif num_points < target_budget:
-            print(f"Point cloud has {num_points} points; sampling with replacement to reach budget {target_budget}.")
-            extra_count = target_budget - num_points
-            extra_indices = np.random.choice(num_points, size=extra_count, replace=True)
-            points = np.concatenate((points, points[extra_indices]), axis=0)
-            colors = np.concatenate((colors, colors[extra_indices]), axis=0)
+        elif num_points < target_budget:  # Use this branch when there are too few input points.
+            print(f"Point cloud has {num_points} points; sampling with replacement to reach budget {target_budget}.")  # Log the sampling decision.
+            extra_count = target_budget - num_points  # Calculate how many extra entries are needed.
+            extra_indices = np.random.choice(num_points, size=extra_count, replace=True)  # Randomly select source points; repeats are allowed.
+            points = np.concatenate((points, points[extra_indices]), axis=0)  # Append sampled positions to reach the budget.
+            colors = np.concatenate((colors, colors[extra_indices]), axis=0)  # Append matching colours in the same order.
 
         # Convert the adjusted positions and matching colours to CUDA tensors.
-        fused_point_cloud = torch.tensor(points, dtype=torch.float32, device="cuda")
-        fused_color = RGB2SH(torch.tensor(colors, dtype=torch.float32, device="cuda"))
+        fused_point_cloud = torch.tensor(points, dtype=torch.float32, device="cuda")  # Store positions as GPU float tensors.
+        fused_color = RGB2SH(torch.tensor(colors, dtype=torch.float32, device="cuda"))  # Convert GPU colours to spherical-harmonic DC values.
 
         # Create one spherical-harmonic feature vector for each sampled point.
-        features = torch.zeros(
-            (fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2),
-            dtype=torch.float32,
-            device="cuda",
+        features = torch.zeros(  # Allocate zero-initialized appearance coefficients.
+            (fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2),  # Shape is points × RGB channels × SH coefficients.
+            dtype=torch.float32,  # Use 32-bit floating-point coefficients.
+            device="cuda",  # Keep the feature tensor on the GPU.
         )
-        features[:, :3, 0] = fused_color
-        features[:, 3:, 1:] = 0.0
+        features[:, :3, 0] = fused_color  # Fill the first SH coefficient with the converted colour.
+        features[:, 3:, 1:] = 0.0  # Leave higher-order coefficients initialized to zero (the slice is empty for RGB).
 
-        print("Number of points at initialisation:", fused_point_cloud.shape[0])
+        print("Number of points at initialisation:", fused_point_cloud.shape[0])  # Report the initial Gaussian count.
 
         # Calculate scales from the same sampled positions that initialize the model.
-        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 1e-7)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 1e-7)  # Estimate nearest-neighbour squared distances and avoid zeros.
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)  # Convert distances into log-scales for all three axes.
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")  # Allocate one quaternion per Gaussian.
+        rots[:, 0] = 1  # Initialize each quaternion to the identity rotation.
 
-        opacities = self.inverse_opacity_activation(
-            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")
+        opacities = self.inverse_opacity_activation(  # Convert desired opacity into the model's trainable logit space.
+            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")  # Initialize every Gaussian at opacity 0.1.
         )
 
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
-        self.pretrained_exposures = None
-        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
-        self._exposure = nn.Parameter(exposure.requires_grad_(True))
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))  # Make positions trainable.
+        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))  # Store trainable DC colour coefficients.
+        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))  # Store trainable higher-order appearance coefficients.
+        self._scaling = nn.Parameter(scales.requires_grad_(True))  # Make Gaussian scales trainable.
+        self._rotation = nn.Parameter(rots.requires_grad_(True))  # Make Gaussian rotations trainable.
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))  # Make Gaussian opacity logits trainable.
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")  # Initialize screen-space radius history for every Gaussian.
+        self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}  # Map image names to exposure indices.
+        self.pretrained_exposures = None  # Indicate that no pretrained exposure values were loaded.
+        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)  # Create one identity exposure transform per camera.
+        self._exposure = nn.Parameter(exposure.requires_grad_(True))  # Make camera exposure transforms trainable.
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
