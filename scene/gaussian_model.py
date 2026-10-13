@@ -493,51 +493,87 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, gaussian_budget=None):
-        """Densify/prune normally, then enforce an optional hard Gaussian-count cap."""
+    def densify_and_prune(
+        self, max_grad, min_opacity, extent, max_screen_size, radii,
+        gaussian_budget=None, stochastic_prune_power=2.0
+    ):
+        """Run standard 3DGS densification and enforce a stochastic Gaussian budget.
+
+        Low-opacity Gaussians receive higher removal probabilities, but the
+        final removals are sampled randomly rather than always taking the
+        lowest-opacity entries. A fixed RNG seed makes a run reproducible.
+        """
+        # Divide accumulated gradients by observation counts to get mean gradients.
         grads = self.xyz_gradient_accum / self.denom
+        # Replace undefined gradients with zero so they cannot trigger densification.
         grads[grads.isnan()] = 0.0
 
+        # Store current projected radii; pruning methods use this temporary array.
         self.tmp_radii = radii
 
-        # Baseline 3DGS growth: clone small Gaussians and split large Gaussians.
+        # Apply the original 3DGS rule: clone small Gaussians with high gradients.
         self.densify_and_clone(grads, max_grad, extent)
+        # Apply the original 3DGS rule: split large Gaussians with high gradients.
         self.densify_and_split(grads, max_grad, extent)
 
-        # First prune points that are too transparent or too large.
+        # Mark Gaussians whose opacity is below the normal 3DGS threshold.
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        # Apply size-based pruning only when a screen-size threshold is active.
         if max_screen_size:
+            # Identify Gaussians that are too large in screen space.
             big_points_vs = self.max_radii2D > max_screen_size
+            # Identify Gaussians whose world-space scale is too large.
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            # Combine transparency and size rules into one removal mask.
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
+        # Remove Gaussians rejected by the baseline 3DGS pruning rules.
         self.prune_points(prune_mask)
 
-        # Cloning and splitting can exceed the budget, so cap the count after growth.
-        # Keep the higher-opacity Gaussians and remove the lowest-opacity excess points.
+        # Enforce the configured maximum after cloning and splitting have added points.
         if gaussian_budget is not None:
+            # Reject invalid budgets before calculating how many points to remove.
             if gaussian_budget <= 0:
                 raise ValueError("gaussian_budget must be a positive integer.")
+            # Validate the sampling power; zero/negative values would not express the intended bias.
+            if stochastic_prune_power <= 0:
+                raise ValueError("stochastic_prune_power must be greater than zero.")
+            # Count the Gaussians that remain after standard pruning.
             current_count = self.get_xyz.shape[0]
+            # Calculate the exact number of Gaussians that must be removed.
             excess_count = current_count - gaussian_budget
+            # Only sample removals when the scene exceeds its budget.
             if excess_count > 0:
+                # Read one activated opacity value for each remaining Gaussian.
                 opacity_scores = self.get_opacity.squeeze(-1)
-                lowest_opacity_indices = torch.topk(
-                    opacity_scores, k=excess_count, largest=False
-                ).indices
+                # Give transparent Gaussians higher weights while keeping every weight positive.
+                removal_weights = (1.0 - opacity_scores).clamp_min(1e-8)
+                # Increase the preference for low opacity; larger powers make the bias stronger.
+                removal_weights = removal_weights.pow(stochastic_prune_power)
+                # Normalize the weights so they form a valid probability distribution.
+                removal_weights = removal_weights / removal_weights.sum()
+                # Randomly choose exactly the excess count, without selecting an index twice.
+                sampled_indices = torch.multinomial(
+                    removal_weights, num_samples=excess_count, replacement=False
+                )
+                # Start with a mask that keeps every Gaussian.
                 budget_prune_mask = torch.zeros(
                     current_count, dtype=torch.bool, device=self.get_xyz.device
                 )
-                budget_prune_mask[lowest_opacity_indices] = True
+                # Mark only the randomly sampled indices for removal.
+                budget_prune_mask[sampled_indices] = True
+                # Remove the sampled Gaussians and update optimizer tensors consistently.
                 self.prune_points(budget_prune_mask)
+                # Report the number removed and the count remaining for experiment logs.
                 print(
-                    f"Gaussian budget enforced: pruned {excess_count} points; "
+                    f"Stochastic Gaussian budget: pruned {excess_count} points; "
                     f"remaining {self.get_xyz.shape[0]} / {gaussian_budget}."
                 )
 
-        # Clear temporary radii only after every pruning operation is complete.
+        # Clear temporary radii after both normal and budget pruning are complete.
         self.tmp_radii = None
+        # Release unused cached CUDA memory, as in the original implementation.
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
