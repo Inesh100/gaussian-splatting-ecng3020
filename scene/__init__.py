@@ -80,12 +80,12 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
-            # Apply the selected budget before Gaussian training starts.
+            # Initialize from the reconstructed point cloud before optimization starts.
             self.gaussians.create_from_pcd(
-                scene_info.point_cloud,
-                scene_info.train_cameras,
-                self.cameras_extent,
-                target_budget=args.gaussian_budget,
+                scene_info.point_cloud,  # Input point positions and colours from scene reconstruction.
+                scene_info.train_cameras,  # Camera information used to initialize exposure parameters.
+                self.cameras_extent,  # Scene radius used to scale position learning rates.
+                target_budget=args.gaussian_budget,  # Maximum number of initial Gaussians requested by the experiment.
             )
 
     def save(self, iteration):
