@@ -148,9 +148,9 @@ class GaussianModel:
     def create_from_pcd(self, pcd: BasicPointCloud, cam_infos: int, spatial_lr_scale: float, target_budget: int = 500000):  # Build the initial Gaussian set and cap its size.
         """Initialize Gaussians from a point cloud with a configurable point budget.
 
-        Positions and colours are sampled together so each position keeps its
-        original colour. Small point clouds are sampled with replacement to
-        reach the requested initial count.
+        If the input exceeds the budget, a random subset is selected without
+        replacement. If it is already within budget, all input points are kept;
+        training densification may add points later.
         """
         self.spatial_lr_scale = spatial_lr_scale  # Store the scene scale used by the position learning rate.
 
@@ -174,13 +174,8 @@ class GaussianModel:
             points = points[sample_indices]  # Keep the selected positions only.
             colors = colors[sample_indices]  # Keep the colours at those same indices.
 
-        # Duplicate randomly selected points when needed to reach the initial budget.
-        elif num_points < target_budget:  # Use this branch when there are too few input points.
-            print(f"Point cloud has {num_points} points; sampling with replacement to reach budget {target_budget}.")  # Log the sampling decision.
-            extra_count = target_budget - num_points  # Calculate how many extra entries are needed.
-            extra_indices = np.random.choice(num_points, size=extra_count, replace=True)  # Randomly select source points; repeats are allowed.
-            points = np.concatenate((points, points[extra_indices]), axis=0)  # Append sampled positions to reach the budget.
-            colors = np.concatenate((colors, colors[extra_indices]), axis=0)  # Append matching colours in the same order.
+        # If the point cloud is already within budget, keep its points unchanged.
+        # Do not duplicate points just to fill the budget; the budget is a maximum, not a target.
 
         # Convert the adjusted positions and matching colours to CUDA tensors.
         fused_point_cloud = torch.tensor(points, dtype=torch.float32, device="cuda")  # Store positions as GPU float tensors.
