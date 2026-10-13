@@ -80,7 +80,13 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            # Apply the selected budget before Gaussian training starts.
+            self.gaussians.create_from_pcd(
+                scene_info.point_cloud,
+                scene_info.train_cameras,
+                self.cameras_extent,
+                target_budget=args.gaussian_budget,
+            )
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
