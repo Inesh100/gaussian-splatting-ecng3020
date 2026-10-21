@@ -1,87 +1,50 @@
 ECNG3020 — Constrained Gaussian Splatting
-============================================================
-
-BASELINE 3DGS EXPERIMENT
-============================================================
+==========================================================
+BASELINE EXPERIMENT
+==========================================================
 
 Dataset
 -------
-Dataset: Garden — 360_v2
-Dataset path: /content/dataset/garden
+Garden — 360_v2
+/content/dataset/garden
 
 Training
 --------
 Iterations: 1000
 Resolution scale: 8
 Viewer: Disabled
-Test iterations: 500, 1000
-Save iteration: 1000
+Gaussian budget: Not applicable to baseline
 
 Hardware
 --------
 GPU: Tesla T4
-PyTorch: 2.11.0+cu128
+PyTorch: 2.11.0+cu130
 CUDA available: True
 
 Model
 -----
-Gaussian count: 278,677
-Point-cloud size: 65.91 MB
+Gaussian count: 279,009
+PLY size: 65.99 MB
 
-Test Set
+Test set
 --------
 Test cameras: 24
-Rendered test images: 24
-Ground-truth test images: 24
+Rendered images: 24
+Ground-truth images: 24
+Images scored: 24
 
-Image Quality
--------------
-PSNR:
-  Mean:    22.4545 dB
-  Minimum: 18.6513 dB
-  Maximum: 23.9083 dB
-
-SSIM:
-  Mean:    0.554374
-  Minimum: 0.479655
-  Maximum: 0.621833
-
-LPIPS:
-  Mean:    0.510075
-  Minimum: 0.427730
-  Maximum: 0.599535
-
-Interpretation
---------------
-PSNR measures pixel-level reconstruction quality.
-Higher PSNR indicates lower reconstruction error.
-
-SSIM measures structural similarity between the rendered
-image and the ground-truth image.
-Higher SSIM indicates greater structural similarity.
-
-LPIPS measures perceptual distance between the rendered
-image and the ground-truth image.
-Lower LPIPS indicates greater perceptual similarity.
-
-Results Structure
------------------
-point_cloud/point_cloud.ply
-render/00000.png
-
-metrics/metrics.csv
-metrics/metrics_summary.csv
-
-comparison/00000.png ... 00023.png
-
-plots/psnr.png
-plots/ssim.png
-plots/lpips.png
-
-Experiment Date
+Quality metrics
 ---------------
-2026-09-17 18:13:28
+ Metric      Mean   Minimum   Maximum
+PSNR_dB 22.428230 18.502028 23.907525
+   SSIM  0.553960  0.476724  0.622252
+  LPIPS  0.510251  0.429965  0.599196
 
-============================================================
-END OF BASELINE REPORT
-============================================================
+Metric interpretation
+PSNR: higher generally indicates lower pixel-level error.
+SSIM: higher generally indicates greater structural similarity.
+LPIPS: lower generally indicates greater perceptual similarity.
+
+Experiment date
+---------------
+2026-10-14 16:35:45

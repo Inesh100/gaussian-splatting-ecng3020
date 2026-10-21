@@ -1,0 +1,51 @@
+ECNG3020 — Constrained Gaussian Splatting
+==========================================================
+STOCHASTIC EXPERIMENT
+==========================================================
+
+Dataset
+-------
+Garden — 360_v2
+/content/dataset/garden
+
+Training
+--------
+Iterations: 1000
+Resolution scale: 8
+Viewer: Disabled
+Configured Gaussian budget: 50000
+Stochastic pruning power: 2.0
+
+Hardware
+--------
+GPU: Tesla T4
+PyTorch: 2.11.0+cu130
+CUDA available: True
+
+Model
+-----
+Gaussian count: 50,000
+PLY size: 11.83 MB
+
+Test set
+--------
+Test cameras: 24
+Rendered images: 24
+Ground-truth images: 24
+Images scored: 24
+
+Quality metrics
+---------------
+ Metric      Mean   Minimum   Maximum
+PSNR_dB 21.026783 17.384271 22.476629
+   SSIM  0.448507  0.387479  0.498541
+  LPIPS  0.633929  0.566513  0.708628
+
+Metric interpretation
+PSNR: higher generally indicates lower pixel-level error.
+SSIM: higher generally indicates greater structural similarity.
+LPIPS: lower generally indicates greater perceptual similarity.
+
+Experiment date
+---------------
+2026-10-14 16:36:25

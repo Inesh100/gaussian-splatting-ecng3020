@@ -145,79 +145,74 @@ class GaussianModel:
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
-    def create_from_pcd(self, pcd: BasicPointCloud, cam_infos: int, spatial_lr_scale: float, target_budget: int = 500000):
+    def create_from_pcd(self, pcd: BasicPointCloud, cam_infos: int, spatial_lr_scale: float, target_budget: int = 500000):  # Build the initial Gaussian set and cap its size.
         """Initialize Gaussians from a point cloud with a configurable point budget.
 
-        Positions and colours are sampled together so each position keeps its
-        original colour. Small point clouds are sampled with replacement to
-        reach the requested initial count.
+        If the input exceeds the budget, a random subset is selected without
+        replacement. If it is already within budget, all input points are kept;
+        training densification may add points later.
         """
-        self.spatial_lr_scale = spatial_lr_scale
+        self.spatial_lr_scale = spatial_lr_scale  # Store the scene scale used by the position learning rate.
 
         # Reject invalid budgets and empty point clouds before sampling.
-        if target_budget <= 0:
-            raise ValueError("target_budget must be a positive integer.")
+        if target_budget <= 0:  # A zero or negative budget cannot initialize a useful scene.
+            raise ValueError("target_budget must be a positive integer.")  # Stop early with a clear error.
 
-        points = np.asarray(pcd.points)
-        colors = np.asarray(pcd.colors)
-        num_points = points.shape[0]
+        points = np.asarray(pcd.points)  # Convert point positions to a NumPy array for sampling.
+        colors = np.asarray(pcd.colors)  # Convert matching point colours to a NumPy array.
+        num_points = points.shape[0]  # Count the available input points.
 
-        if num_points == 0:
-            raise ValueError("The input point cloud is empty.")
-        if colors.shape[0] != num_points:
-            raise ValueError("The point and colour arrays must contain the same number of entries.")
+        if num_points == 0:  # Sampling cannot work if there are no input points.
+            raise ValueError("The input point cloud is empty.")  # Explain why initialization cannot continue.
+        if colors.shape[0] != num_points:  # Every point must have one matching colour.
+            raise ValueError("The point and colour arrays must contain the same number of entries.")  # Reject misaligned data.
 
         # Downsample without replacement when the input exceeds the budget.
-        if num_points > target_budget:
-            print(f"Point cloud has {num_points} points; downsampling to budget {target_budget}.")
-            sample_indices = np.random.choice(num_points, size=target_budget, replace=False)
-            points = points[sample_indices]
-            colors = colors[sample_indices]
+        if num_points > target_budget:  # Use this branch when the point cloud is too large.
+            print(f"Point cloud has {num_points} points; downsampling to budget {target_budget}.")  # Log the sampling decision.
+            sample_indices = np.random.choice(num_points, size=target_budget, replace=False)  # Randomly choose distinct point indices.
+            points = points[sample_indices]  # Keep the selected positions only.
+            colors = colors[sample_indices]  # Keep the colours at those same indices.
 
-        # Duplicate randomly selected points when needed to reach the initial budget.
-        elif num_points < target_budget:
-            print(f"Point cloud has {num_points} points; sampling with replacement to reach budget {target_budget}.")
-            extra_count = target_budget - num_points
-            extra_indices = np.random.choice(num_points, size=extra_count, replace=True)
-            points = np.concatenate((points, points[extra_indices]), axis=0)
-            colors = np.concatenate((colors, colors[extra_indices]), axis=0)
+        # If the point cloud is already within budget, keep its points unchanged.
+        # Do not duplicate points just to fill the budget; the budget is a maximum, not a target.
 
         # Convert the adjusted positions and matching colours to CUDA tensors.
-        fused_point_cloud = torch.tensor(points, dtype=torch.float32, device="cuda")
-        fused_color = RGB2SH(torch.tensor(colors, dtype=torch.float32, device="cuda"))
+        fused_point_cloud = torch.tensor(points, dtype=torch.float32, device="cuda")  # Store positions as GPU float tensors.
+        fused_color = RGB2SH(torch.tensor(colors, dtype=torch.float32, device="cuda"))  # Convert GPU colours to spherical-harmonic DC values.
 
         # Create one spherical-harmonic feature vector for each sampled point.
-        features = torch.zeros(
-            (fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2),
-            dtype=torch.float32,
-            device="cuda",
+        features = torch.zeros(  # Allocate zero-initialized appearance coefficients.
+            (fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2),  # Shape is points × RGB channels × SH coefficients.
+            dtype=torch.float32,  # Use 32-bit floating-point coefficients.
+            device="cuda",  # Keep the feature tensor on the GPU.
         )
-        features[:, :3, 0] = fused_color
-        features[:, 3:, 1:] = 0.0
+        features[:, :3, 0] = fused_color  # Fill the first SH coefficient with the converted colour.
+        features[:, 3:, 1:] = 0.0  # Leave higher-order coefficients initialized to zero (the slice is empty for RGB).
 
-        print("Number of points at initialisation:", fused_point_cloud.shape[0])
+        print("Number of points at initialisation:", fused_point_cloud.shape[0])  # Report the initial Gaussian count.
 
         # Calculate scales from the same sampled positions that initialize the model.
-        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 1e-7)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 1e-7)  # Estimate nearest-neighbour squared distances and avoid zeros.
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)  # Convert distances into log-scales for all three axes.
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")  # Allocate one quaternion per Gaussian.
+        rots[:, 0] = 1  # Initialize each quaternion to the identity rotation.
 
-        opacities = self.inverse_opacity_activation(
-            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")
+        opacities = self.inverse_opacity_activation(  # Convert desired opacity into the model's trainable logit space.
+            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")  # Initialize every Gaussian at opacity 0.1.
         )
 
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
-        self.pretrained_exposures = None
-        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
-        self._exposure = nn.Parameter(exposure.requires_grad_(True))
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))  # Make positions trainable.
+        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))  # Store trainable DC colour coefficients.
+        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))  # Store trainable higher-order appearance coefficients.
+        self._scaling = nn.Parameter(scales.requires_grad_(True))  # Make Gaussian scales trainable.
+        self._rotation = nn.Parameter(rots.requires_grad_(True))  # Make Gaussian rotations trainable.
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))  # Make Gaussian opacity logits trainable.
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")  # Initialize screen-space radius history for every Gaussian.
+        self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}  # Map image names to exposure indices.
+        self.pretrained_exposures = None  # Indicate that no pretrained exposure values were loaded.
+        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)  # Create one identity exposure transform per camera.
+        self._exposure = nn.Parameter(exposure.requires_grad_(True))  # Make camera exposure transforms trainable.
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -493,51 +488,87 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, gaussian_budget=None):
-        """Densify/prune normally, then enforce an optional hard Gaussian-count cap."""
+    def densify_and_prune(
+        self, max_grad, min_opacity, extent, max_screen_size, radii,
+        gaussian_budget=None, stochastic_prune_power=2.0
+    ):
+        """Run standard 3DGS densification and enforce a stochastic Gaussian budget.
+
+        Low-opacity Gaussians receive higher removal probabilities, but the
+        final removals are sampled randomly rather than always taking the
+        lowest-opacity entries. A fixed RNG seed makes a run reproducible.
+        """
+        # Divide accumulated gradients by observation counts to get mean gradients.
         grads = self.xyz_gradient_accum / self.denom
+        # Replace undefined gradients with zero so they cannot trigger densification.
         grads[grads.isnan()] = 0.0
 
+        # Store current projected radii; pruning methods use this temporary array.
         self.tmp_radii = radii
 
-        # Baseline 3DGS growth: clone small Gaussians and split large Gaussians.
+        # Apply the original 3DGS rule: clone small Gaussians with high gradients.
         self.densify_and_clone(grads, max_grad, extent)
+        # Apply the original 3DGS rule: split large Gaussians with high gradients.
         self.densify_and_split(grads, max_grad, extent)
 
-        # First prune points that are too transparent or too large.
+        # Mark Gaussians whose opacity is below the normal 3DGS threshold.
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        # Apply size-based pruning only when a screen-size threshold is active.
         if max_screen_size:
+            # Identify Gaussians that are too large in screen space.
             big_points_vs = self.max_radii2D > max_screen_size
+            # Identify Gaussians whose world-space scale is too large.
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            # Combine transparency and size rules into one removal mask.
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
+        # Remove Gaussians rejected by the baseline 3DGS pruning rules.
         self.prune_points(prune_mask)
 
-        # Cloning and splitting can exceed the budget, so cap the count after growth.
-        # Keep the higher-opacity Gaussians and remove the lowest-opacity excess points.
+        # Enforce the configured maximum after cloning and splitting have added points.
         if gaussian_budget is not None:
+            # Reject invalid budgets before calculating how many points to remove.
             if gaussian_budget <= 0:
                 raise ValueError("gaussian_budget must be a positive integer.")
+            # Validate the sampling power; zero/negative values would not express the intended bias.
+            if stochastic_prune_power <= 0:
+                raise ValueError("stochastic_prune_power must be greater than zero.")
+            # Count the Gaussians that remain after standard pruning.
             current_count = self.get_xyz.shape[0]
+            # Calculate the exact number of Gaussians that must be removed.
             excess_count = current_count - gaussian_budget
+            # Only sample removals when the scene exceeds its budget.
             if excess_count > 0:
+                # Read one activated opacity value for each remaining Gaussian.
                 opacity_scores = self.get_opacity.squeeze(-1)
-                lowest_opacity_indices = torch.topk(
-                    opacity_scores, k=excess_count, largest=False
-                ).indices
+                # Give transparent Gaussians higher weights while keeping every weight positive.
+                removal_weights = (1.0 - opacity_scores).clamp_min(1e-8)
+                # Increase the preference for low opacity; larger powers make the bias stronger.
+                removal_weights = removal_weights.pow(stochastic_prune_power)
+                # Normalize the weights so they form a valid probability distribution.
+                removal_weights = removal_weights / removal_weights.sum()
+                # Randomly choose exactly the excess count, without selecting an index twice.
+                sampled_indices = torch.multinomial(
+                    removal_weights, num_samples=excess_count, replacement=False
+                )
+                # Start with a mask that keeps every Gaussian.
                 budget_prune_mask = torch.zeros(
                     current_count, dtype=torch.bool, device=self.get_xyz.device
                 )
-                budget_prune_mask[lowest_opacity_indices] = True
+                # Mark only the randomly sampled indices for removal.
+                budget_prune_mask[sampled_indices] = True
+                # Remove the sampled Gaussians and update optimizer tensors consistently.
                 self.prune_points(budget_prune_mask)
+                # Report the number removed and the count remaining for experiment logs.
                 print(
-                    f"Gaussian budget enforced: pruned {excess_count} points; "
+                    f"Stochastic Gaussian budget: pruned {excess_count} points; "
                     f"remaining {self.get_xyz.shape[0]} / {gaussian_budget}."
                 )
 
-        # Clear temporary radii only after every pruning operation is complete.
+        # Clear temporary radii after both normal and budget pruning are complete.
         self.tmp_radii = None
+        # Release unused cached CUDA memory, as in the original implementation.
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
