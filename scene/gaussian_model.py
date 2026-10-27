@@ -488,88 +488,97 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
+    def densify_and_blur_split(self, radius_threshold=2.0, N=2):
+        """Split Gaussians with large projected footprints instead of using gradient thresholds."""
+        # Combine the historical maximum projected radius with the current view's radius.
+        # This lets a Gaussian qualify even when it is not visible in the current training view.
+        blur_score = torch.maximum(self.max_radii2D, self.tmp_radii)  # Approximate image-space blur using projected footprint.
+        selected_pts_mask = blur_score >= radius_threshold  # Select the Gaussians whose screen-space footprint is too large.
+        selected_count = int(selected_pts_mask.sum().item())  # Count selected parents for logging and the no-op check.
+
+        # Avoid tensor construction and optimizer updates when no Gaussian reaches the threshold.
+        if selected_count == 0:
+            return
+
+        # Sample child positions around each selected parent using its current 3D scale.
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)  # Repeat each parent's scale once per child.
+        means = torch.zeros((stds.size(0), 3), device=self.get_xyz.device)  # Center each sampling distribution at zero.
+        samples = torch.normal(mean=means, std=stds)  # Sample local offsets inside each parent's Gaussian footprint.
+        rotations = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)  # Rotate local offsets into world coordinates.
+        new_xyz = torch.bmm(rotations, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)  # Place children around their parent.
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N))  # Shrink children to distribute the parent's footprint.
+        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)  # Inherit parent orientations.
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)  # Preserve low-order colour coefficients.
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)  # Preserve higher-order appearance coefficients.
+        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)  # Initialize children with their parent's opacity logits.
+        new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)  # Keep temporary radius bookkeeping aligned with the new children.
+
+        # Append children first so optimizer state and model tensors stay synchronized.
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+
+        # Remove each selected parent; its children now represent the finer footprint.
+        parent_prune_mask = torch.cat((selected_pts_mask, torch.zeros(N * selected_count, device=self.get_xyz.device, dtype=torch.bool)))  # Build a full mask for parents plus children.
+        self.prune_points(parent_prune_mask)  # Remove parents and preserve all newly generated children.
+        print(f"Blur Split: split {selected_count} parents into {N * selected_count} children.")  # Record this densification event.
+
     def densify_and_prune(
         self, max_grad, min_opacity, extent, max_screen_size, radii,
-        gaussian_budget=None, stochastic_prune_power=2.0
+        gaussian_budget=None, stochastic_prune_power=2.0,
+        densification_method="gradient", blur_split_radius_threshold=2.0
     ):
-        """Run standard 3DGS densification and enforce a stochastic Gaussian budget.
-
-        Low-opacity Gaussians receive higher removal probabilities, but the
-        final removals are sampled randomly rather than always taking the
-        lowest-opacity entries. A fixed RNG seed makes a run reproducible.
-        """
+        """Densify with gradient rules or Blur Split, prune, and enforce the Gaussian budget."""
         # Divide accumulated gradients by observation counts to get mean gradients.
-        grads = self.xyz_gradient_accum / self.denom
-        # Replace undefined gradients with zero so they cannot trigger densification.
-        grads[grads.isnan()] = 0.0
+        grads = self.xyz_gradient_accum / self.denom  # Compute each Gaussian's mean view-space gradient.
+        # Replace undefined gradients with zero so they cannot trigger gradient densification.
+        grads[grads.isnan()] = 0.0  # Prevent NaNs from selecting points accidentally.
 
-        # Store current projected radii; pruning methods use this temporary array.
-        self.tmp_radii = radii
+        # Store the current view's projected radii for the split routine and pruning bookkeeping.
+        self.tmp_radii = radii  # The array must remain aligned with the current Gaussian ordering.
 
-        # Apply the original 3DGS rule: clone small Gaussians with high gradients.
-        self.densify_and_clone(grads, max_grad, extent)
-        # Apply the original 3DGS rule: split large Gaussians with high gradients.
-        self.densify_and_split(grads, max_grad, extent)
+        # Choose exactly one densification strategy for a controlled experiment.
+        if densification_method == "gradient":  # Preserve the existing 3DGS gradient-based method.
+            self.densify_and_clone(grads, max_grad, extent)  # Clone small high-gradient Gaussians.
+            self.densify_and_split(grads, max_grad, extent)  # Split large high-gradient Gaussians.
+        elif densification_method == "blur_split":  # Use projected footprint rather than gradient magnitude.
+            if blur_split_radius_threshold <= 0:  # Reject thresholds that would select every nonnegative radius.
+                raise ValueError("blur_split_radius_threshold must be greater than zero.")
+            self.densify_and_blur_split(  # Split Gaussians whose projected footprints appear too broad.
+                radius_threshold=blur_split_radius_threshold  # Interpret the threshold in projected pixel-radius units.
+            )
+        else:  # Fail clearly rather than silently running the wrong experiment.
+            raise ValueError("densification_method must be 'gradient' or 'blur_split'.")
 
-        # Mark Gaussians whose opacity is below the normal 3DGS threshold.
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        # Apply the original 3DGS opacity rule after either densification strategy.
+        prune_mask = (self.get_opacity < min_opacity).squeeze()  # Mark Gaussians below the opacity threshold.
         # Apply size-based pruning only when a screen-size threshold is active.
         if max_screen_size:
-            # Identify Gaussians that are too large in screen space.
-            big_points_vs = self.max_radii2D > max_screen_size
-            # Identify Gaussians whose world-space scale is too large.
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            # Combine transparency and size rules into one removal mask.
-            prune_mask = torch.logical_or(
-                torch.logical_or(prune_mask, big_points_vs), big_points_ws
-            )
-        # Remove Gaussians rejected by the baseline 3DGS pruning rules.
-        self.prune_points(prune_mask)
+            big_points_vs = self.max_radii2D > max_screen_size  # Mark Gaussians that are too large in screen space.
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent  # Mark Gaussians that are too large in world space.
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)  # Combine pruning criteria.
+        self.prune_points(prune_mask)  # Remove points rejected by the baseline pruning rules.
 
-        # Enforce the configured maximum after cloning and splitting have added points.
+        # Enforce the experiment's hard Gaussian budget after densification and ordinary pruning.
         if gaussian_budget is not None:
-            # Reject invalid budgets before calculating how many points to remove.
-            if gaussian_budget <= 0:
+            if gaussian_budget <= 0:  # A nonpositive budget cannot represent a valid model.
                 raise ValueError("gaussian_budget must be a positive integer.")
-            # Validate the sampling power; zero/negative values would not express the intended bias.
-            if stochastic_prune_power <= 0:
+            if stochastic_prune_power <= 0:  # The configured stochastic pruning power must remain positive.
                 raise ValueError("stochastic_prune_power must be greater than zero.")
-            # Count the Gaussians that remain after standard pruning.
-            current_count = self.get_xyz.shape[0]
-            # Calculate the exact number of Gaussians that must be removed.
-            excess_count = current_count - gaussian_budget
-            # Only sample removals when the scene exceeds its budget.
-            if excess_count > 0:
-                # Read one activated opacity value for each remaining Gaussian.
-                opacity_scores = self.get_opacity.squeeze(-1)
-                # Give transparent Gaussians higher weights while keeping every weight positive.
-                removal_weights = (1.0 - opacity_scores).clamp_min(1e-8)
-                # Increase the preference for low opacity; larger powers make the bias stronger.
-                removal_weights = removal_weights.pow(stochastic_prune_power)
-                # Normalize the weights so they form a valid probability distribution.
-                removal_weights = removal_weights / removal_weights.sum()
-                # Randomly choose exactly the excess count, without selecting an index twice.
-                sampled_indices = torch.multinomial(
-                    removal_weights, num_samples=excess_count, replacement=False
-                )
-                # Start with a mask that keeps every Gaussian.
-                budget_prune_mask = torch.zeros(
-                    current_count, dtype=torch.bool, device=self.get_xyz.device
-                )
-                # Mark only the randomly sampled indices for removal.
-                budget_prune_mask[sampled_indices] = True
-                # Remove the sampled Gaussians and update optimizer tensors consistently.
-                self.prune_points(budget_prune_mask)
-                # Report the number removed and the count remaining for experiment logs.
-                print(
-                    f"Stochastic Gaussian budget: pruned {excess_count} points; "
-                    f"remaining {self.get_xyz.shape[0]} / {gaussian_budget}."
-                )
+            current_count = self.get_xyz.shape[0]  # Count the Gaussians remaining after normal pruning.
+            excess_count = current_count - gaussian_budget  # Calculate how many must be removed to satisfy the cap.
+            if excess_count > 0:  # Do extra pruning only if the model exceeds its maximum size.
+                opacity_scores = self.get_opacity.squeeze(-1)  # Read activated opacity values in [0, 1].
+                removal_weights = (1.0 - opacity_scores).clamp_min(1e-8)  # Prefer transparent Gaussians without zero weights.
+                removal_weights = removal_weights.pow(stochastic_prune_power)  # Strengthen the preference for low-opacity points.
+                removal_weights = removal_weights / removal_weights.sum()  # Convert weights to sampling probabilities.
+                sampled_indices = torch.multinomial(removal_weights, num_samples=excess_count, replacement=False)  # Sample distinct removals.
+                budget_prune_mask = torch.zeros(current_count, dtype=torch.bool, device=self.get_xyz.device)  # Initially keep every Gaussian.
+                budget_prune_mask[sampled_indices] = True  # Mark the sampled Gaussians for removal.
+                self.prune_points(budget_prune_mask)  # Update model and optimizer tensors together.
+                print(f"Gaussian budget: pruned {excess_count}; remaining {self.get_xyz.shape[0]} / {gaussian_budget} (method={densification_method}).")  # Log hard-cap enforcement.
 
-        # Clear temporary radii after both normal and budget pruning are complete.
-        self.tmp_radii = None
-        # Release unused cached CUDA memory, as in the original implementation.
-        torch.cuda.empty_cache()
+        # Clear temporary radius data after all pruning operations have completed.
+        self.tmp_radii = None  # Prevent stale radii from being reused during the next densification cycle.
+        torch.cuda.empty_cache()  # Release unused cached CUDA memory.
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
