@@ -100,7 +100,9 @@ class OptimizationParams(ParamGroup):
         self.optimizer_type = "default"
         # Controls the stochastic bias toward removing low-opacity Gaussians.
         # 1.0 gives a mild bias; larger values favour low-opacity points more strongly.
-        self.stochastic_prune_power = 2.0
+        self.stochastic_prune_power = 2.0  # Preserve the existing stochastic budget-pruning default.
+        self.densification_method = "gradient"  # Keep standard gradient densification as the default comparison method.
+        self.blur_split_radius_threshold = 2.0  # Split Gaussians whose maximum projected radius reaches this many pixels.
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
