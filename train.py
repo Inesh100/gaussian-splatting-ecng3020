@@ -177,6 +177,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         radii,  # Current view-space radii required by the pruning code.
                         gaussian_budget=dataset.gaussian_budget,  # Maximum allowed number of Gaussians.
                         stochastic_prune_power=opt.stochastic_prune_power,  # Strength of low-opacity removal bias.
+                        densification_method=opt.densification_method,  # Select standard gradient densification or Blur Split.
+                        blur_split_radius_threshold=opt.blur_split_radius_threshold,  # Pixel-radius threshold for Blur Split candidates.
                     )
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
