@@ -521,10 +521,43 @@ class GaussianModel:
         self.prune_points(parent_prune_mask)  # Remove parents and preserve all newly generated children.
         print(f"Blur Split: split {selected_count} parents into {N * selected_count} children.")  # Record this densification event.
 
+    def densify_and_minisplatting_blur_split(self, max_contribution_area, image_height, image_width, threshold=2e-4, N=2):  # Split Gaussians whose maximum-contribution pixel count exceeds the paper-style threshold.
+        """Apply Mini-Splatting's maximum-contribution-area selection criterion when the rasterizer provides its counts."""  # Document the algorithm's required renderer output.
+        if max_contribution_area is None:  # Detect that the installed rasterizer has not been extended to report maximum-contribution counts.
+            raise RuntimeError("Mini-Splatting Blur Split requires rasterizer output 'max_contribution_area'; the current rasterizer does not provide it.")  # Fail rather than silently substituting the radius heuristic.
+        if image_height <= 0 or image_width <= 0:  # Validate the image dimensions before computing a pixel-area threshold.
+            raise ValueError("image_height and image_width must both be positive.")  # Reject invalid camera dimensions.
+        if threshold <= 0:  # Require a positive image-area fraction.
+            raise ValueError("mini_splatting_blur_threshold must be greater than zero.")  # Prevent a zero or negative selection threshold.
+        if max_contribution_area.ndim != 1 or max_contribution_area.numel() != self.get_xyz.shape[0]:  # Ensure one contribution count exists for each current Gaussian.
+            raise ValueError("max_contribution_area must be a 1D tensor aligned with the current Gaussian ordering.")  # Prevent mismatched masks from selecting incorrect parents.
+        area_threshold = threshold * image_height * image_width  # Convert the paper's image-area fraction into a pixel-count threshold.
+        selected_pts_mask = max_contribution_area > area_threshold  # Select Gaussians that are the maximum alpha-blending contributor at enough pixels.
+        selected_count = int(selected_pts_mask.sum().item())  # Count selected parents for logging and the no-op check.
+        if selected_count == 0:  # Avoid optimizer updates when no Gaussian exceeds the contribution-area threshold.
+            return  # Leave the Gaussian model unchanged for this densification cycle.
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)  # Repeat each selected parent's 3D scale once per child.
+        means = torch.zeros((stds.size(0), 3), device=self.get_xyz.device)  # Center each child-offset distribution at zero in local coordinates.
+        samples = torch.normal(mean=means, std=stds)  # Sample child offsets using the selected parents' scales.
+        rotations = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)  # Rotate sampled offsets into world coordinates.
+        new_xyz = torch.bmm(rotations, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)  # Place child Gaussians around their parent positions.
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N))  # Reduce child scales as in the existing split implementation.
+        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)  # Inherit each selected parent's orientation.
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)  # Copy the low-order appearance coefficients to the children.
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)  # Copy the higher-order appearance coefficients to the children.
+        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)  # Initialize each child with the parent's opacity logits.
+        new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)  # Preserve radius bookkeeping for the newly created children.
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)  # Append children while synchronizing optimizer tensors.
+        parent_prune_mask = torch.cat((selected_pts_mask, torch.zeros(N * selected_count, device=self.get_xyz.device, dtype=torch.bool)))  # Build a mask that removes selected parents but keeps their children.
+        self.prune_points(parent_prune_mask)  # Replace the selected parents with their smaller children.
+        print(f"Mini-Splatting-style Blur Split: split {selected_count} parents into {N * selected_count} children (area threshold={area_threshold:.1f} pixels).")  # Log the criterion and split count.
+
     def densify_and_prune(
         self, max_grad, min_opacity, extent, max_screen_size, radii,
         gaussian_budget=None, stochastic_prune_power=2.0,
-        densification_method="gradient", blur_split_radius_threshold=2.0
+        densification_method="gradient", blur_split_radius_threshold=2.0,
+        mini_splatting_blur_threshold=2e-4, max_contribution_area=None,
+        image_height=None, image_width=None
     ):
         """Densify with gradient rules or Blur Split, prune, and enforce the Gaussian budget."""
         # Divide accumulated gradients by observation counts to get mean gradients.
@@ -545,8 +578,15 @@ class GaussianModel:
             self.densify_and_blur_split(  # Split Gaussians whose projected footprints appear too broad.
                 radius_threshold=blur_split_radius_threshold  # Interpret the threshold in projected pixel-radius units.
             )
+        elif densification_method == "mini_splatting_blur_split":  # Use maximum-contribution pixel counts instead of projected radius as the selection criterion.
+            self.densify_and_minisplatting_blur_split(  # Split only Gaussians whose maximum-contribution area exceeds the image-relative threshold.
+                max_contribution_area=max_contribution_area,  # Receive per-Gaussian maximum-contribution pixel counts from the rasterizer.
+                image_height=image_height,  # Supply the current rendered image height.
+                image_width=image_width,  # Supply the current rendered image width.
+                threshold=mini_splatting_blur_threshold  # Apply the configured fraction of image area.
+            )
         else:  # Fail clearly rather than silently running the wrong experiment.
-            raise ValueError("densification_method must be 'gradient' or 'blur_split'.")
+            raise ValueError("densification_method must be 'gradient', 'blur_split', or 'mini_splatting_blur_split'.")
 
         # Apply the original 3DGS opacity rule after either densification strategy.
         prune_mask = (self.get_opacity < min_opacity).squeeze()  # Mark Gaussians below the opacity threshold.
