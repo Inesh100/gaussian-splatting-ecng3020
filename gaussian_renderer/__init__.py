@@ -86,28 +86,35 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         colors_precomp = override_color
 
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    if separate_sh:
-        rendered_image, radii, depth_image = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            dc = dc,
-            shs = shs,
-            colors_precomp = colors_precomp,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp)
-    else:
-        rendered_image, radii, depth_image = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            shs = shs,
-            colors_precomp = colors_precomp,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp)
+    # Rasterize visible Gaussians and retain the rasterizer's complete output tuple.  # Keep this flexible so an instrumented extension can append contribution counts.
+    if separate_sh:  # Use separate spherical-harmonic tensors when the sparse optimizer path requests them.
+        rasterizer_outputs = rasterizer(  # Capture every value returned by the rasterizer instead of assuming a fixed tuple length.
+            means3D = means3D,  # Supply the Gaussian centers in world coordinates.
+            means2D = means2D,  # Supply the screen-space gradient placeholder used by 3DGS.
+            dc = dc,  # Supply the low-order spherical-harmonic coefficients.
+            shs = shs,  # Supply the remaining spherical-harmonic coefficients.
+            colors_precomp = colors_precomp,  # Supply precomputed colors when Python color conversion is enabled.
+            opacities = opacity,  # Supply activated Gaussian opacities.
+            scales = scales,  # Supply Gaussian scales when covariance is not precomputed.
+            rotations = rotations,  # Supply Gaussian rotations when covariance is not precomputed.
+            cov3D_precomp = cov3D_precomp)  # Supply precomputed covariance when Python covariance conversion is enabled.
+    else:  # Use the standard rasterizer call when separate spherical harmonics are not requested.
+        rasterizer_outputs = rasterizer(  # Capture the outputs from the standard rasterization path.
+            means3D = means3D,  # Supply the Gaussian centers in world coordinates.
+            means2D = means2D,  # Supply the screen-space gradient placeholder used by 3DGS.
+            shs = shs,  # Supply spherical-harmonic appearance coefficients.
+            colors_precomp = colors_precomp,  # Supply precomputed colors when available.
+            opacities = opacity,  # Supply activated Gaussian opacities.
+            scales = scales,  # Supply Gaussian scales when covariance is not precomputed.
+            rotations = rotations,  # Supply Gaussian rotations when covariance is not precomputed.
+            cov3D_precomp = cov3D_precomp)  # Supply precomputed covariance when Python covariance conversion is enabled.
+    if len(rasterizer_outputs) == 3:  # Preserve compatibility with the current rasterizer that returns image, radii, and depth.
+        rendered_image, radii, depth_image = rasterizer_outputs  # Unpack the three standard rasterizer outputs.
+        max_contribution_area = None  # Mark contribution counts as unavailable unless the rasterizer explicitly returns them.
+    elif len(rasterizer_outputs) == 4:  # Accept a custom rasterizer extension that also returns maximum-contribution pixel counts.
+        rendered_image, radii, depth_image, max_contribution_area = rasterizer_outputs  # Unpack image, radii, depth, and per-Gaussian contribution areas.
+    else:  # Reject unexpected rasterizer APIs before training silently uses the wrong values.
+        raise RuntimeError(f"Expected rasterizer to return 3 or 4 values, but received {len(rasterizer_outputs)}.")  # Report the extension mismatch clearly.
         
     # Apply exposure to rendered image (training only)
     if use_trained_exp:
@@ -122,7 +129,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         "viewspace_points": screenspace_points,
         "visibility_filter" : (radii > 0).nonzero(),
         "radii": radii,
-        "depth" : depth_image
+        "depth" : depth_image,  # Preserve the rendered depth map for depth-related training losses.
+        "max_contribution_area": max_contribution_area  # Expose optional per-Gaussian maximum-contribution pixel counts from an instrumented rasterizer.
         }
     
     return out
