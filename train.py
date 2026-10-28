@@ -178,7 +178,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussian_budget=dataset.gaussian_budget,  # Maximum allowed number of Gaussians.
                         stochastic_prune_power=opt.stochastic_prune_power,  # Strength of low-opacity removal bias.
                         densification_method=opt.densification_method,  # Select standard gradient densification or Blur Split.
-                        blur_split_radius_threshold=opt.blur_split_radius_threshold,  # Pixel-radius threshold for Blur Split candidates.
+                        blur_split_radius_threshold=opt.blur_split_radius_threshold,  # Pixel-radius threshold for radius-based Blur Split candidates.
+                        mini_splatting_blur_threshold=opt.mini_splatting_blur_threshold,  # Image-area fraction for contribution-based Blur Split candidates.
+                        max_contribution_area=render_pkg.get("max_contribution_area"),  # Per-Gaussian pixel counts supplied by a rasterizer extension that implements the paper's criterion.
+                        image_height=int(viewpoint_cam.image_height),  # Use the current camera's rendered image height for the area threshold.
+                        image_width=int(viewpoint_cam.image_width),  # Use the current camera's rendered image width for the area threshold.
                     )
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
