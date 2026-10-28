@@ -103,6 +103,7 @@ class OptimizationParams(ParamGroup):
         self.stochastic_prune_power = 2.0  # Preserve the existing stochastic budget-pruning default.
         self.densification_method = "gradient"  # Keep standard gradient densification as the default comparison method.
         self.blur_split_radius_threshold = 2.0  # Split Gaussians whose maximum projected radius reaches this many pixels.
+        self.mini_splatting_blur_threshold = 2e-4  # Fraction of image pixels used as Mini-Splatting-style contribution-area threshold.
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
